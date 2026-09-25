@@ -1,4 +1,4 @@
-services:
+﻿services:
   postgres:
     image: postgres:16-alpine
     environment:
@@ -24,7 +24,7 @@ services:
       PORT: "3000"
       HOSTNAME: 0.0.0.0
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - uploads:/app/storage/uploads
     depends_on:
@@ -35,3 +35,4 @@ services:
 volumes:
   postgres_data:
   uploads:
+
