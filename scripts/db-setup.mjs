@@ -5,7 +5,15 @@ import { Client } from "pg";
 const DEFAULT_DATABASE_URL =
   "postgresql://postgres:123@127.0.0.1:5432/gatecontrol";
 
-const databaseUrl = process.env.DATABASE_URL || DEFAULT_DATABASE_URL;
+function resolveDatabaseUrl() {
+  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("DATABASE_URL is required in production");
+  }
+  return DEFAULT_DATABASE_URL;
+}
+
+const databaseUrl = resolveDatabaseUrl();
 const parsedUrl = new URL(databaseUrl);
 const databaseName = parsedUrl.pathname.replace(/^\//, "") || "gatecontrol";
 

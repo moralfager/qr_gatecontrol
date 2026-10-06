@@ -139,7 +139,7 @@ export default function LoginPage() {
             </form>
 
             <p className="mt-4 text-center text-xs text-zinc-400">
-              Демо: <strong>admin/admin123</strong>, <strong>contractor/contractor123</strong>, <strong>ass/approver123</strong>, <strong>tb/approver123</strong>, <strong>guard/guard123</strong>.
+              Первичный вход: <strong>admin/admin123</strong>, <strong>contractor/contractor123</strong>, <strong>ass/approver123</strong>, <strong>tb/approver123</strong>, <strong>guard/guard123</strong>.
             </p>
 
             <p className="mt-4 text-center text-sm text-zinc-500">

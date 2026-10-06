@@ -20,7 +20,11 @@ export interface CurrentUser {
 }
 
 function secret() {
-  return process.env.SESSION_SECRET || "dev-session-secret-change-before-production";
+  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("SESSION_SECRET is required in production");
+  }
+  return "dev-session-secret-change-before-production";
 }
 
 function sign(data: string) {
