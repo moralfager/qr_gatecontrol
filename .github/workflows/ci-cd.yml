@@ -117,7 +117,7 @@ jobs:
       - name: Copy compose file
         run: |
           SSH_OPTS="-i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=~/.ssh/known_hosts"
-          ssh $SSH_OPTS "$AWS_USER@$AWS_HOST" "mkdir -p '$DEPLOY_PATH'"
+          ssh $SSH_OPTS "$AWS_USER@$AWS_HOST" "sudo mkdir -p '$DEPLOY_PATH' && sudo chown '$AWS_USER:$AWS_USER' '$DEPLOY_PATH'"
           scp $SSH_OPTS docker-compose.prod.yml "$AWS_USER@$AWS_HOST:$DEPLOY_PATH/docker-compose.yml"
 
       - name: Prepare server Docker
