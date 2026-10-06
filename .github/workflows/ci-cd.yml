@@ -81,34 +81,81 @@ jobs:
     permissions:
       contents: read
       packages: read
+    env:
+      AWS_HOST: ${{ secrets.AWS_HOST }}
+      AWS_USER: ${{ secrets.AWS_USER }}
+      AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+      SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+      APP_URL: ${{ secrets.APP_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Check deploy secrets
+        run: |
+          missing=0
+          for name in AWS_HOST AWS_USER AWS_SSH_PRIVATE_KEY DEPLOY_PATH POSTGRES_PASSWORD SESSION_SECRET APP_URL; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing GitHub Actions secret: ${name}"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
 
       - name: Configure SSH
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.AWS_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          printf '%s\n' "$AWS_SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "${{ secrets.AWS_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -H "$AWS_HOST" >> ~/.ssh/known_hosts
 
       - name: Copy compose file
         run: |
-          ssh -i ~/.ssh/deploy_key "${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }}" "mkdir -p '${{ secrets.DEPLOY_PATH }}'"
-          scp -i ~/.ssh/deploy_key docker-compose.prod.yml "${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }}:${{ secrets.DEPLOY_PATH }}/docker-compose.yml"
+          ssh -i ~/.ssh/deploy_key "$AWS_USER@$AWS_HOST" "mkdir -p '$DEPLOY_PATH'"
+          scp -i ~/.ssh/deploy_key docker-compose.prod.yml "$AWS_USER@$AWS_HOST:$DEPLOY_PATH/docker-compose.yml"
+
+      - name: Prepare server Docker
+        run: |
+          ssh -i ~/.ssh/deploy_key "$AWS_USER@$AWS_HOST" << 'EOF'
+          set -e
+          if ! command -v docker >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y ca-certificates curl git
+              curl -fsSL https://get.docker.com | sudo sh
+            elif command -v dnf >/dev/null 2>&1; then
+              sudo dnf install -y docker git
+              sudo systemctl enable --now docker
+            elif command -v yum >/dev/null 2>&1; then
+              sudo yum install -y docker git
+              sudo systemctl enable --now docker
+            else
+              echo "No supported package manager found to install Docker" >&2
+              exit 1
+            fi
+          fi
+          if ! docker compose version >/dev/null 2>&1; then
+            echo "Docker Compose plugin is unavailable" >&2
+            exit 1
+          fi
+          EOF
 
       - name: Deploy
         run: |
-          ssh -i ~/.ssh/deploy_key "${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }}" << EOF
+          ssh -i ~/.ssh/deploy_key "$AWS_USER@$AWS_HOST" << EOF
           set -e
-          cd "${{ secrets.DEPLOY_PATH }}"
+          cd "$DEPLOY_PATH"
           cat > .env << ENVEOF
           POSTGRES_USER=postgres
-          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
-          DATABASE_URL=postgresql://postgres:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/gatecontrol
-          SESSION_SECRET=${{ secrets.SESSION_SECRET }}
-          APP_URL=${{ secrets.APP_URL }}
+          POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+          DATABASE_URL=postgresql://postgres:$POSTGRES_PASSWORD@postgres:5432/gatecontrol
+          SESSION_SECRET=$SESSION_SECRET
+          APP_URL=$APP_URL
           APP_IMAGE=${{ needs.build_image.outputs.image }}
           ENVEOF
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
