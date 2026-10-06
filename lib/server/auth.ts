@@ -31,6 +31,10 @@ function sign(data: string) {
   return crypto.createHmac("sha256", secret()).update(data).digest("hex");
 }
 
+function secureCookies() {
+  return process.env.APP_URL?.startsWith("https://") ?? process.env.NODE_ENV === "production";
+}
+
 export function hashPassword(password: string) {
   const iterations = 260000;
   const salt = crypto.randomBytes(16);
@@ -100,14 +104,14 @@ export function setAuthCookies(response: NextResponse, user: CurrentUser | { id:
   response.cookies.set(SESSION_COOKIE, makeSession(user.id), {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: secureCookies(),
     path: "/",
     maxAge: SESSION_TTL_SECONDS,
   });
   response.cookies.set(ROLE_COOKIE, user.role, {
     httpOnly: false,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: secureCookies(),
     path: "/",
     maxAge: SESSION_TTL_SECONDS,
   });
