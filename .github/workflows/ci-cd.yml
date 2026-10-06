@@ -112,16 +112,18 @@ jobs:
           chmod 700 ~/.ssh
           printf '%s\n' "$AWS_SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$AWS_HOST" >> ~/.ssh/known_hosts
+          echo "Deploy target: $AWS_USER@$AWS_HOST"
 
       - name: Copy compose file
         run: |
-          ssh -i ~/.ssh/deploy_key "$AWS_USER@$AWS_HOST" "mkdir -p '$DEPLOY_PATH'"
-          scp -i ~/.ssh/deploy_key docker-compose.prod.yml "$AWS_USER@$AWS_HOST:$DEPLOY_PATH/docker-compose.yml"
+          SSH_OPTS="-i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=~/.ssh/known_hosts"
+          ssh $SSH_OPTS "$AWS_USER@$AWS_HOST" "mkdir -p '$DEPLOY_PATH'"
+          scp $SSH_OPTS docker-compose.prod.yml "$AWS_USER@$AWS_HOST:$DEPLOY_PATH/docker-compose.yml"
 
       - name: Prepare server Docker
         run: |
-          ssh -i ~/.ssh/deploy_key "$AWS_USER@$AWS_HOST" << 'EOF'
+          SSH_OPTS="-i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=~/.ssh/known_hosts"
+          ssh $SSH_OPTS "$AWS_USER@$AWS_HOST" << 'EOF'
           set -e
           if ! command -v docker >/dev/null 2>&1; then
             if command -v apt-get >/dev/null 2>&1; then
@@ -147,7 +149,8 @@ jobs:
 
       - name: Deploy
         run: |
-          ssh -i ~/.ssh/deploy_key "$AWS_USER@$AWS_HOST" << EOF
+          SSH_OPTS="-i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=~/.ssh/known_hosts"
+          ssh $SSH_OPTS "$AWS_USER@$AWS_HOST" << EOF
           set -e
           cd "$DEPLOY_PATH"
           cat > .env << ENVEOF
