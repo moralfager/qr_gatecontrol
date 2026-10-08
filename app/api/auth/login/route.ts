@@ -9,7 +9,17 @@ const ROLE_HOME: Record<string, string> = {
   guard: "/guard",
   contractor: "/contractor",
   approver: "/approver",
-  user: "/dashboard",
+};
+
+type LoginUser = {
+  id: number;
+  login: string;
+  email: string;
+  name: string;
+  role: string;
+  department: string | null;
+  organization_name: string | null;
+  password_hash: string;
 };
 
 export async function POST(request: NextRequest) {
@@ -20,7 +30,7 @@ export async function POST(request: NextRequest) {
     if (!login || !password) {
       return NextResponse.json({ error: "Введите логин и пароль" }, { status: 400 });
     }
-    const result = await query<any>(
+    const result = await query<LoginUser>(
       `SELECT u.*, o.name AS organization_name
        FROM users u
        LEFT JOIN organizations o ON o.id = u.organization_id
@@ -32,7 +42,13 @@ export async function POST(request: NextRequest) {
     if (!user || !verifyPassword(password, user.password_hash)) {
       return NextResponse.json({ error: "Неверный логин или пароль" }, { status: 401 });
     }
-    await audit(queryClient, user.id, "auth.login", "user", user.id);
+    await audit(queryClient, user.id, "auth.login", "user", user.id, {
+      login: user.login,
+      name: user.name,
+      role: user.role,
+      department: user.department,
+      organization: user.organization_name,
+    });
     const response = NextResponse.json({
       user: {
         id: user.id,

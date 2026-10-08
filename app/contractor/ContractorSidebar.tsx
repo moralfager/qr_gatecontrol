@@ -1,14 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
 import SidebarShell from "../components/SidebarShell";
 
 const NAV = [
-  { href: "/contractor", label: "Кабинет" },
-  { href: "/contractor/application/new?type=workers", label: "Новая заявка (работники)" },
-  { href: "/contractor/application/new?type=vehicles", label: "Новая заявка (автотранспорт)" },
+  { href: "/contractor", label: "Кабинет", shortLabel: "Кабинет" },
+  { href: "/contractor/application/new?type=workers", label: "Новая заявка (работники)", shortLabel: "Работники" },
+  { href: "/contractor/application/new?type=vehicles", label: "Новая заявка (автотранспорт)", shortLabel: "Автотранспорт" },
 ];
 
 function isActive(pathname: string | null, href: string, currentType: string): boolean {
@@ -25,26 +24,23 @@ function isActive(pathname: string | null, href: string, currentType: string): b
 
 export default function ContractorSidebar() {
   const pathname = usePathname();
-  const [currentType, setCurrentType] = useState("");
-
-  useEffect(() => {
-    setCurrentType(new URLSearchParams(window.location.search).get("type") ?? "");
-  }, [pathname]);
+  const currentType = useSearchParams().get("type") ?? "";
 
   return (
     <SidebarShell title="Подрядчик">
-      <ul className="flex flex-col gap-1">
-        {NAV.map(({ href, label }) => {
+      <ul className="grid grid-cols-2 gap-2 lg:flex lg:min-w-0 lg:flex-col">
+        {NAV.map(({ href, label, shortLabel }) => {
           const active = isActive(pathname, href, currentType);
           return (
             <li key={href}>
               <Link
                 href={href}
-                className={`block rounded-lg px-4 py-2.5 text-sm font-medium transition-colors ${
+                className={`block rounded-lg px-3 py-2.5 text-center text-sm font-medium transition-colors lg:px-4 lg:text-left ${
                   active ? "bg-[#032c4f] text-white" : "text-zinc-700 hover:bg-zinc-100"
                 }`}
               >
-                {label}
+                <span className="lg:hidden">{shortLabel}</span>
+                <span className="hidden lg:inline">{label}</span>
               </Link>
             </li>
           );

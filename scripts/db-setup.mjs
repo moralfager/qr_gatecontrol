@@ -35,6 +35,21 @@ function hashPassword(password) {
   ].join("$");
 }
 
+function seedPassword(name, fallback) {
+  if (process.env.NODE_ENV === "production" && !process.env[`SEED_${name.toUpperCase()}_PASSWORD`]) {
+    throw new Error(`SEED_${name.toUpperCase()}_PASSWORD is required in production`);
+  }
+  return process.env[`SEED_${name.toUpperCase()}_PASSWORD`] || fallback;
+}
+
+const ADMIN_USER = {
+  login: process.env.SEED_ADMIN_LOGIN || "admin",
+  email: process.env.SEED_ADMIN_EMAIL || "admin@example.local",
+  name: process.env.SEED_ADMIN_NAME || "Администратор",
+  password: seedPassword("admin", "admin123"),
+};
+const RESET_ADMIN_PASSWORD = process.env.RESET_ADMIN_PASSWORD === "true";
+
 const DOC_TYPES = [
   ["LETTER", "Письмо", "common"],
   ["PTM", "Удостоверение ПТМ", "employee"],
@@ -110,10 +125,10 @@ const VEHICLE_TYPES = [
   ["Грузовой автомобиль", ["LETTER", "TECH_PASSPORT", "DIAG"]],
 ];
 
-const ORGANIZATIONS = [
-  ["ТОО «ЕмбіМұнайГаз»", "123456789012", "enterprise"],
-  ["ТОО «Varro Operating Group»", "987654321098", "contractor"],
-  ["АО «Жылыоймунайгаз»", "112233445566", "enterprise"],
+const LEGACY_SEED_ORGANIZATIONS = [
+  "ТОО «ЕмбіМұнайГаз»",
+  "ТОО «Varro Operating Group»",
+  "АО «Жылыоймунайгаз»",
 ];
 
 const ZONES = [
@@ -128,13 +143,21 @@ const POSTS = [
   ["КПП №3 — Складская зона", "PRORVA"],
 ];
 
-const USERS = [
-  ["admin", "admin@example.local", "Администратор", "admin", "ТОО «ЕмбіМұнайГаз»", null, "admin123"],
-  ["user", "user@example.local", "Пользователь предприятия", "user", "ТОО «ЕмбіМұнайГаз»", null, "user123"],
-  ["contractor", "contractor@example.local", "Подрядчик", "contractor", "ТОО «Varro Operating Group»", null, "contractor123"],
-  ["ass", "ass@example.local", "Согласующий АСС", "approver", "ТОО «ЕмбіМұнайГаз»", "АСС", "approver123"],
-  ["tb", "tb@example.local", "Согласующий ТБ", "approver", "ТОО «ЕмбіМұнайГаз»", "ТБ", "approver123"],
-  ["guard", "guard@example.local", "Охранник КПП", "guard", "ТОО «ЕмбіМұнайГаз»", null, "guard123"],
+const LEGACY_SEED_LOGINS = ["user", "contractor", "ass", "tb", "guard"];
+
+const APPLICATION_STATUSES = [
+  ["draft", "Черновик", 10, false],
+  ["submitted", "На согласовании", 20, false],
+  ["approved", "Согласована", 30, true],
+  ["returned", "На доработке", 40, true],
+  ["rejected", "Отклонена", 50, true],
+];
+
+const PASS_STATUSES = [
+  ["active", "Действует", 10, false],
+  ["expired", "Истек", 20, true],
+  ["blocked", "Заблокирован", 30, true],
+  ["revoked", "Аннулирован", 40, true],
 ];
 
 const SCHEMA_SQL = `
@@ -229,6 +252,24 @@ CREATE TABLE IF NOT EXISTS approval_route_steps (
   UNIQUE(route_id, step_order, department)
 );
 
+CREATE TABLE IF NOT EXISTS application_statuses (
+  code TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  terminal BOOLEAN NOT NULL DEFAULT false,
+  active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS pass_statuses (
+  code TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  terminal BOOLEAN NOT NULL DEFAULT false,
+  active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS applications (
   id SERIAL PRIMARY KEY,
   number TEXT NOT NULL UNIQUE,
@@ -237,6 +278,7 @@ CREATE TABLE IF NOT EXISTS applications (
   organization_id INTEGER REFERENCES organizations(id),
   created_by INTEGER REFERENCES users(id),
   route_id INTEGER REFERENCES approval_routes(id),
+  approval_cycle INTEGER NOT NULL DEFAULT 0,
   comment TEXT NOT NULL DEFAULT '',
   submitted_at TIMESTAMPTZ,
   decided_at TIMESTAMPTZ,
@@ -296,11 +338,25 @@ CREATE TABLE IF NOT EXISTS approvals (
   route_step_id INTEGER NOT NULL REFERENCES approval_route_steps(id),
   approver_user_id INTEGER REFERENCES users(id),
   department TEXT NOT NULL,
+  cycle INTEGER NOT NULL DEFAULT 1,
   decision TEXT NOT NULL DEFAULT 'pending',
   comment TEXT NOT NULL DEFAULT '',
   decided_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(application_id, route_step_id)
+  UNIQUE(application_id, route_step_id, cycle)
+);
+
+CREATE TABLE IF NOT EXISTS application_history (
+  id SERIAL PRIMARY KEY,
+  application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+  cycle INTEGER NOT NULL DEFAULT 0,
+  action TEXT NOT NULL,
+  actor_user_id INTEGER REFERENCES users(id),
+  status_from TEXT,
+  status_to TEXT,
+  comment TEXT NOT NULL DEFAULT '',
+  details JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS passes (
@@ -361,6 +417,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
 CREATE INDEX IF NOT EXISTS idx_approvals_pending ON approvals(decision, department);
+CREATE INDEX IF NOT EXISTS idx_application_history_application ON application_history(application_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_passes_token ON passes(token);
 CREATE INDEX IF NOT EXISTS idx_access_events_created ON access_events(created_at);
 `;
@@ -408,15 +465,31 @@ async function upsertDocType(client, [code, name, category]) {
   return result.rows[0].id;
 }
 
+async function upsertStatus(client, table, [code, name, sortOrder, terminal]) {
+  await client.query(
+    `INSERT INTO ${table} (code, name, sort_order, terminal)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (code) DO UPDATE SET
+       name = EXCLUDED.name,
+       sort_order = EXCLUDED.sort_order,
+       terminal = EXCLUDED.terminal,
+       active = true`,
+    [code, name, sortOrder, terminal],
+  );
+}
+
 async function seed(client) {
   const docIds = new Map();
   for (const doc of DOC_TYPES) {
     docIds.set(doc[0], await upsertDocType(client, doc));
   }
 
-  const orgIds = new Map();
-  for (const [name, bin, orgType] of ORGANIZATIONS) {
-    orgIds.set(name, await upsertName(client, "organizations", name, { bin, org_type: orgType }));
+  for (const status of APPLICATION_STATUSES) {
+    await upsertStatus(client, "application_statuses", status);
+  }
+
+  for (const status of PASS_STATUSES) {
+    await upsertStatus(client, "pass_statuses", status);
   }
 
   const zoneIds = new Map();
@@ -430,9 +503,8 @@ async function seed(client) {
     zoneIds.set(code, result.rows[0].id);
   }
 
-  const postIds = [];
   for (const [name, zoneCode] of POSTS) {
-    postIds.push(await upsertName(client, "guard_posts", name, { zone_id: zoneIds.get(zoneCode) }));
+    await upsertName(client, "guard_posts", name, { zone_id: zoneIds.get(zoneCode) });
   }
 
   for (const [name, docs] of PROFESSIONS) {
@@ -459,25 +531,49 @@ async function seed(client) {
     }
   }
 
-  const userIds = new Map();
-  for (const [login, email, name, role, orgName, department, password] of USERS) {
-    const allowedPosts = role === "guard" ? postIds : [];
-    const result = await client.query(
-      `INSERT INTO users (login, email, name, password_hash, role, organization_id, department, allowed_post_ids)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (login) DO UPDATE SET
-         email = EXCLUDED.email,
-         name = EXCLUDED.name,
-         role = EXCLUDED.role,
-         organization_id = EXCLUDED.organization_id,
-         department = EXCLUDED.department,
-         allowed_post_ids = EXCLUDED.allowed_post_ids,
-         active = true
-       RETURNING id`,
-      [login, email, name, hashPassword(password), role, orgIds.get(orgName), department, allowedPosts],
-    );
-    userIds.set(login, result.rows[0].id);
+  const legacyUsers = await client.query(
+    "SELECT id FROM users WHERE login = ANY($1::text[]) AND email LIKE '%@example.local'",
+    [LEGACY_SEED_LOGINS],
+  );
+  const legacyUserIds = legacyUsers.rows.map((row) => row.id);
+  if (legacyUserIds.length) {
+    await client.query("UPDATE applications SET created_by = NULL WHERE created_by = ANY($1::int[])", [legacyUserIds]);
+    await client.query("UPDATE approvals SET approver_user_id = NULL WHERE approver_user_id = ANY($1::int[])", [legacyUserIds]);
+    await client.query("UPDATE documents SET uploaded_by = NULL WHERE uploaded_by = ANY($1::int[])", [legacyUserIds]);
+    await client.query("DELETE FROM audit_logs WHERE user_id = ANY($1::int[])", [legacyUserIds]);
+    await client.query("DELETE FROM access_events WHERE guard_id = ANY($1::int[])", [legacyUserIds]);
+    await client.query("DELETE FROM notifications WHERE user_id = ANY($1::int[])", [legacyUserIds]);
+    await client.query("DELETE FROM users WHERE id = ANY($1::int[])", [legacyUserIds]);
   }
+
+  const adminResult = await client.query(
+    `INSERT INTO users (login, email, name, password_hash, role, organization_id, department, allowed_post_ids)
+     VALUES ($1, $2, $3, $4, 'admin', NULL, NULL, '{}')
+     ON CONFLICT (login) DO UPDATE SET
+       email = EXCLUDED.email,
+       name = EXCLUDED.name,
+       password_hash = CASE WHEN $5::boolean THEN EXCLUDED.password_hash ELSE users.password_hash END,
+       role = 'admin',
+       organization_id = NULL,
+       department = NULL,
+       allowed_post_ids = '{}',
+       active = true
+     RETURNING id`,
+    [
+      ADMIN_USER.login,
+      ADMIN_USER.email,
+      ADMIN_USER.name,
+      hashPassword(ADMIN_USER.password),
+      RESET_ADMIN_PASSWORD,
+    ],
+  );
+  await client.query(
+    `DELETE FROM organizations o
+     WHERE o.name = ANY($1::text[])
+       AND NOT EXISTS (SELECT 1 FROM users u WHERE u.organization_id = o.id)
+       AND NOT EXISTS (SELECT 1 FROM applications a WHERE a.organization_id = o.id)`,
+    [LEGACY_SEED_ORGANIZATIONS],
+  );
 
   const route = await client.query(
     `INSERT INTO approval_routes (name, mode)
@@ -487,24 +583,40 @@ async function seed(client) {
   );
   const routeId = route.rows[0].id;
   const steps = [
-    [1, "АСС", userIds.get("ass")],
-    [1, "ТБ", userIds.get("tb")],
+    [1, "АСС"],
+    [1, "ТБ"],
   ];
-  for (const [order, department, userId] of steps) {
+  for (const [order, department] of steps) {
     await client.query(
       `INSERT INTO approval_route_steps (route_id, step_order, department, approver_user_id)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (route_id, step_order, department)
        DO UPDATE SET approver_user_id = EXCLUDED.approver_user_id, required = true`,
-      [routeId, order, department, userId],
+      [routeId, order, department, null],
     );
   }
 
-  await client.query(
-    `INSERT INTO audit_logs (user_id, action, entity_type, details)
-     VALUES ($1, 'db.seed', 'system', $2::jsonb)`,
-    [userIds.get("admin"), JSON.stringify({ professions: PROFESSIONS.length, vehicleTypes: VEHICLE_TYPES.length })],
+  const sequentialRoute = await client.query(
+    `INSERT INTO approval_routes (name, mode)
+     VALUES ('АСС затем ТБ', 'sequential')
+     ON CONFLICT (name) DO UPDATE SET mode = 'sequential', active = true
+     RETURNING id`,
   );
+  const sequentialRouteId = sequentialRoute.rows[0].id;
+  const sequentialSteps = [
+    [1, "АСС"],
+    [2, "ТБ"],
+  ];
+  for (const [order, department] of sequentialSteps) {
+    await client.query(
+      `INSERT INTO approval_route_steps (route_id, step_order, department, approver_user_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (route_id, step_order, department)
+       DO UPDATE SET approver_user_id = EXCLUDED.approver_user_id, required = true`,
+      [sequentialRouteId, order, department, null],
+    );
+  }
+  return adminResult.rows[0].id;
 }
 
 async function main() {
@@ -514,6 +626,61 @@ async function main() {
   try {
     await client.query("BEGIN");
     await client.query(SCHEMA_SQL);
+    await client.query("ALTER TABLE applications ADD COLUMN IF NOT EXISTS approval_cycle INTEGER NOT NULL DEFAULT 0");
+    await client.query("ALTER TABLE approvals ADD COLUMN IF NOT EXISTS cycle INTEGER NOT NULL DEFAULT 1");
+    await client.query("CREATE INDEX IF NOT EXISTS idx_approvals_application_cycle ON approvals(application_id, cycle)");
+    await client.query(`
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'approvals_application_id_route_step_id_key'
+  ) THEN
+    ALTER TABLE approvals DROP CONSTRAINT approvals_application_id_route_step_id_key;
+  END IF;
+END $$;
+`);
+    await client.query("CREATE UNIQUE INDEX IF NOT EXISTS approvals_application_route_step_cycle_idx ON approvals(application_id, route_step_id, cycle)");
+    await client.query("UPDATE applications SET approval_cycle = 1 WHERE approval_cycle = 0 AND EXISTS (SELECT 1 FROM approvals WHERE approvals.application_id = applications.id)");
+    await client.query(`
+INSERT INTO application_history (application_id, cycle, action, actor_user_id, status_from, status_to, comment, details, created_at)
+SELECT a.id, a.approval_cycle, 'application.submit', a.created_by, NULL, 'submitted', a.comment,
+       jsonb_build_object('number', a.number, 'backfilled', true),
+       COALESCE(a.submitted_at, a.created_at)
+FROM applications a
+WHERE a.approval_cycle > 0
+  AND NOT EXISTS (
+    SELECT 1 FROM application_history ah
+    WHERE ah.application_id = a.id AND ah.action IN ('application.submit', 'application.resubmit')
+  )
+`);
+    await client.query(`
+INSERT INTO application_history (application_id, cycle, action, actor_user_id, status_from, status_to, comment, details, created_at)
+SELECT ap.application_id, ap.cycle, 'approval.' || ap.decision, ap.approver_user_id, 'submitted',
+       CASE WHEN ap.decision IN ('returned', 'rejected') THEN ap.decision ELSE 'submitted' END,
+       ap.comment,
+       jsonb_build_object('approvalId', ap.id, 'department', ap.department, 'backfilled', true),
+       COALESCE(ap.decided_at, ap.created_at)
+FROM approvals ap
+WHERE ap.decision <> 'pending'
+  AND NOT EXISTS (
+    SELECT 1 FROM application_history ah
+    WHERE ah.application_id = ap.application_id
+      AND ah.details ->> 'approvalId' = ap.id::text
+  )
+`);
+    await client.query(`
+INSERT INTO application_history (application_id, cycle, action, actor_user_id, status_from, status_to, comment, details, created_at)
+SELECT a.id, a.approval_cycle, 'application.approved', NULL, 'submitted', 'approved', '',
+       jsonb_build_object('number', a.number, 'backfilled', true),
+       COALESCE(a.decided_at, a.updated_at)
+FROM applications a
+WHERE a.status = 'approved'
+  AND NOT EXISTS (
+    SELECT 1 FROM application_history ah
+    WHERE ah.application_id = a.id AND ah.action = 'application.approved'
+  )
+`);
     await seed(client);
     await client.query("COMMIT");
     console.log(`Database ${databaseName} is ready`);

@@ -26,6 +26,14 @@ type DirectoryItem = {
   doc_count?: number;
 };
 
+type RequiredDocument = {
+  target_type: "profession" | "vehicle_type";
+  target_id: number;
+  id: number;
+  code: string;
+  name: string;
+};
+
 type Dictionaries = {
   organizations: DirectoryItem[];
   professions: DirectoryItem[];
@@ -33,6 +41,7 @@ type Dictionaries = {
   documentTypes: DirectoryItem[];
   zones: DirectoryItem[];
   posts: DirectoryItem[];
+  requiredDocuments: RequiredDocument[];
 };
 
 const DIR_ITEMS: { id: Kind; label: string }[] = [
@@ -59,13 +68,13 @@ const TITLES: Record<Kind, string> = {
 
 const STATUS_TEXT = [
   { type: "Заявка", values: "Черновик, На согласовании, Согласована, Отклонена, На доработке" },
-  { type: "Пропуск", values: "Активен, Аннулирован, Просрочен по сроку действия" },
+  { type: "Пропуск", values: "Действует, Истек, Заблокирован, Аннулирован" },
 ];
 
 const ROUTE_TEXT = [
   "Маршруты хранятся в базе в таблицах approval_routes и approval_route_steps.",
-  "Сейчас создан маршрут по умолчанию: АСС + ТБ параллельно.",
-  "Последовательный режим уже поддержан на уровне API согласований и включается сменой mode на sequential.",
+  "Скрипт инициализации создает два маршрута: АСС + ТБ параллельно и АСС затем ТБ.",
+  "По умолчанию для новых заявок выбирается активный параллельный маршрут.",
 ];
 
 function emptyDraft(kind: Kind): Record<string, string> {
@@ -87,6 +96,7 @@ export default function AdminDirectoriesPage() {
   const [activeKind, setActiveKind] = useState<Kind>("organization");
   const [dict, setDict] = useState<Dictionaries | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>(emptyDraft("organization"));
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -125,8 +135,17 @@ export default function AdminDirectoriesPage() {
   function selectKind(kind: Kind) {
     setActiveKind(kind);
     setDraft(emptyDraft(kind));
+    setSelectedDocumentIds([]);
     setError("");
     setMessage("");
+  }
+
+  function docsForTarget(targetType: "profession" | "vehicle_type", targetId: number) {
+    return dict?.requiredDocuments.filter((doc) => doc.target_type === targetType && doc.target_id === targetId) ?? [];
+  }
+
+  function toggleDocument(id: number) {
+    setSelectedDocumentIds((prev) => prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]);
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -136,7 +155,10 @@ export default function AdminDirectoriesPage() {
     setError("");
     setMessage("");
     try {
-      const body: Record<string, string | number> = { kind: activeKind, ...draft };
+      const body: Record<string, unknown> = { kind: activeKind, ...draft };
+      if (activeKind === "profession" || activeKind === "vehicle_type") {
+        body.documentTypeIds = selectedDocumentIds;
+      }
       if (activeKind === "post") body.zone_id = Number(draft.zone_id);
       const response = await fetch("/api/admin/directories", {
         method: "POST",
@@ -147,6 +169,7 @@ export default function AdminDirectoriesPage() {
       if (!response.ok) throw new Error(data.error || "Не удалось сохранить запись");
       setMessage("Справочник обновлен");
       setDraft(emptyDraft(activeKind));
+      setSelectedDocumentIds([]);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ошибка сохранения");
@@ -177,8 +200,65 @@ export default function AdminDirectoriesPage() {
     }
   }
 
+  function editRow(row: DirectoryItem) {
+    setDraft({ ...emptyDraft(activeKind), name: row.name });
+    if (activeKind === "profession") {
+      setSelectedDocumentIds(docsForTarget("profession", row.id).map((doc) => doc.id));
+    } else if (activeKind === "vehicle_type") {
+      setSelectedDocumentIds(docsForTarget("vehicle_type", row.id).map((doc) => doc.id));
+    }
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
   function renderForm() {
     if (activeKind === "routes" || activeKind === "status") return null;
+    if (activeKind === "organization") {
+      return (
+        <div className="mb-5 rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-600">
+          Организации создаются через создание аккаунта подрядчика. У одной организации может быть только один активный подрядчик.
+        </div>
+      );
+    }
+    if (activeKind === "profession" || activeKind === "vehicle_type") {
+      const category = activeKind === "profession" ? "employee" : "vehicle";
+      const docs = dict?.documentTypes.filter((doc) => doc.active && (doc.category === category || doc.category === "common")) ?? [];
+      return (
+        <form onSubmit={submit} className="mb-5 grid gap-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
+          <input
+            value={draft.name ?? ""}
+            onChange={(event) => setDraft((prev) => ({ ...prev, name: event.target.value }))}
+            className="input"
+            placeholder={activeKind === "profession" ? "Название профессии" : "Вид автотранспорта"}
+          />
+          <div>
+            <p className="text-sm font-medium text-zinc-700">Обязательные документы</p>
+            <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+              {docs.map((doc) => (
+                <label key={doc.id} className="flex cursor-pointer items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm has-[:checked]:border-[#032c4f] has-[:checked]:bg-[#032c4f]/5">
+                  <input type="checkbox" checked={selectedDocumentIds.includes(doc.id)} onChange={() => toggleDocument(doc.id)} />
+                  <span>{doc.name}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          <input
+            value={draft.newDocuments ?? ""}
+            onChange={(event) => setDraft((prev) => ({ ...prev, newDocuments: event.target.value }))}
+            className="input"
+            placeholder="Новые документы через запятую"
+          />
+          <div>
+            <button
+              type="submit"
+              disabled={busy}
+              className="rounded-lg bg-[#032c4f] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#042a4a] disabled:opacity-50"
+            >
+              Сохранить
+            </button>
+          </div>
+        </form>
+      );
+    }
     return (
       <form onSubmit={submit} className="mb-5 grid gap-3 rounded-xl border border-zinc-200 bg-zinc-50 p-4 lg:grid-cols-[1fr_1fr_auto]">
         {activeKind === "document_type" && (
@@ -195,24 +275,6 @@ export default function AdminDirectoriesPage() {
           className="input"
           placeholder={activeKind === "post" ? "Название поста" : "Название"}
         />
-        {activeKind === "organization" && (
-          <>
-            <input
-              value={draft.bin ?? ""}
-              onChange={(event) => setDraft((prev) => ({ ...prev, bin: event.target.value }))}
-              className="input"
-              placeholder="БИН/ИИН"
-            />
-            <select
-              value={draft.org_type ?? "contractor"}
-              onChange={(event) => setDraft((prev) => ({ ...prev, org_type: event.target.value }))}
-              className="input"
-            >
-              <option value="contractor">Подрядчик</option>
-              <option value="enterprise">Предприятие</option>
-            </select>
-          </>
-        )}
         {activeKind === "document_type" && (
           <select
             value={draft.category ?? "worker"}
@@ -233,16 +295,34 @@ export default function AdminDirectoriesPage() {
           />
         )}
         {activeKind === "post" && (
-          <select
-            value={draft.zone_id ?? ""}
-            onChange={(event) => setDraft((prev) => ({ ...prev, zone_id: event.target.value }))}
-            className="input"
-          >
-            <option value="">Зона</option>
-            {dict?.zones.filter((zone) => zone.active).map((zone) => (
-              <option key={zone.id} value={zone.id}>{zone.name}</option>
-            ))}
-          </select>
+          <>
+            <select
+              value={draft.zone_id ?? ""}
+              onChange={(event) => setDraft((prev) => ({ ...prev, zone_id: event.target.value, zone_name: event.target.value ? "" : prev.zone_name ?? "" }))}
+              className="input"
+            >
+              <option value="">Создать новую зону</option>
+              {dict?.zones.filter((zone) => zone.active).map((zone) => (
+                <option key={zone.id} value={zone.id}>{zone.name}</option>
+              ))}
+            </select>
+            {!draft.zone_id && (
+              <>
+                <input
+                  value={draft.zone_name ?? ""}
+                  onChange={(event) => setDraft((prev) => ({ ...prev, zone_name: event.target.value }))}
+                  className="input"
+                  placeholder="Название новой зоны"
+                />
+                <input
+                  value={draft.zone_code ?? ""}
+                  onChange={(event) => setDraft((prev) => ({ ...prev, zone_code: event.target.value }))}
+                  className="input"
+                  placeholder="Код новой зоны (можно пустым)"
+                />
+              </>
+            )}
+          </>
         )}
         <button
           type="submit"
@@ -286,7 +366,7 @@ export default function AdminDirectoriesPage() {
           {(activeKind === "document_type" || activeKind === "zone") && <AdminTh>Код</AdminTh>}
           {activeKind === "organization" && <AdminTh>БИН/ИИН</AdminTh>}
           {activeKind === "organization" && <AdminTh>Тип</AdminTh>}
-          {(activeKind === "profession" || activeKind === "vehicle_type") && <AdminTh>Документов</AdminTh>}
+          {(activeKind === "profession" || activeKind === "vehicle_type") && <AdminTh>Документы</AdminTh>}
           {activeKind === "document_type" && <AdminTh>Категория</AdminTh>}
           {activeKind === "post" && <AdminTh>Зона</AdminTh>}
           <AdminTh>Статус</AdminTh>
@@ -301,19 +381,35 @@ export default function AdminDirectoriesPage() {
               {(activeKind === "document_type" || activeKind === "zone") && <AdminTd className="font-mono text-zinc-500">{row.code}</AdminTd>}
               {activeKind === "organization" && <AdminTd className="font-mono text-zinc-500">{row.bin}</AdminTd>}
               {activeKind === "organization" && <AdminTd>{row.org_type === "enterprise" ? "Предприятие" : "Подрядчик"}</AdminTd>}
-              {(activeKind === "profession" || activeKind === "vehicle_type") && <AdminTd>{row.doc_count ?? 0}</AdminTd>}
+              {activeKind === "profession" && (
+                <AdminTd>{docsForTarget("profession", row.id).map((doc) => doc.name).join(", ") || "-"}</AdminTd>
+              )}
+              {activeKind === "vehicle_type" && (
+                <AdminTd>{docsForTarget("vehicle_type", row.id).map((doc) => doc.name).join(", ") || "-"}</AdminTd>
+              )}
               {activeKind === "document_type" && <AdminTd>{row.category}</AdminTd>}
               {activeKind === "post" && <AdminTd>{row.zone_name || "-"}</AdminTd>}
               <AdminTd>{row.active ? <AdminBadge green>Активна</AdminBadge> : <AdminBadge>Отключена</AdminBadge>}</AdminTd>
               <AdminTd>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => toggle(activeKind, row.id, !row.active)}
-                  className="text-sm font-medium text-[#032c4f] hover:underline disabled:opacity-50"
-                >
-                  {row.active ? "Отключить" : "Восстановить"}
-                </button>
+                <div className="flex flex-wrap gap-2">
+                  {(activeKind === "profession" || activeKind === "vehicle_type") && (
+                    <button
+                      type="button"
+                      onClick={() => editRow(row)}
+                      className="text-sm font-medium text-[#032c4f] hover:underline"
+                    >
+                      Изменить
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => toggle(activeKind, row.id, !row.active)}
+                    className="text-sm font-medium text-[#032c4f] hover:underline disabled:opacity-50"
+                  >
+                    {row.active ? "Отключить" : "Восстановить"}
+                  </button>
+                </div>
               </AdminTd>
             </tr>
           ))}

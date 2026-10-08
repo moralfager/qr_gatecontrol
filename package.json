@@ -7,10 +7,13 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "db:setup": "node scripts/db-setup.mjs"
+    "db:setup": "node scripts/db-setup.mjs",
+    "db:init": "powershell -ExecutionPolicy Bypass -File scripts/init-db.ps1"
   },
   "dependencies": {
+    "@types/pdfkit": "^0.17.6",
     "next": "^16.3.6",
+    "pdfkit": "^0.20.2",
     "pg": "^8.23.0",
     "qrcode": "^1.5.4",
     "react": "19.2.3",

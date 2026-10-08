@@ -100,14 +100,14 @@ const ADMIN_NAV = [
 
 export function AdminNav({ currentPath }: { currentPath: string }) {
   return (
-    <ul className="flex flex-col gap-1">
+    <ul className="grid grid-cols-2 gap-2 lg:flex lg:min-w-0 lg:flex-col">
       {ADMIN_NAV.map(({ href, label }) => {
         const isActive = href === "/admin" ? currentPath === "/admin" : currentPath.startsWith(href);
         return (
           <li key={href}>
             <Link
               href={href}
-              className={`block rounded-lg px-4 py-2.5 text-sm font-medium transition-colors ${
+              className={`block rounded-lg px-3 py-2.5 text-center text-sm font-medium transition-colors lg:px-4 lg:text-left ${
                 isActive
                   ? "bg-[#032c4f] text-white"
                   : "text-zinc-700 hover:bg-zinc-100"

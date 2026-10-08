@@ -87,7 +87,7 @@ export default function LoginPage() {
         <div className="flex flex-1 flex-col items-center justify-center md:w-[min(400px,45%)] md:flex-none">
           <div className="w-full max-w-[360px] rounded-2xl border border-white/10 bg-white/95 p-6 shadow-2xl backdrop-blur-sm sm:max-w-[400px] sm:p-8 md:max-w-none">
             <div className="border-l-4 border-[#032c4f] pl-4">
-              <h1 className="text-xl font-semibold tracking-tight text-[#032c4f] sm:text-2xl">
+              <h1 className="text-xl font-semibold text-[#032c4f] sm:text-2xl">
                 Вход в систему
               </h1>
               <p className="mt-1 text-sm text-zinc-500">
@@ -137,10 +137,6 @@ export default function LoginPage() {
                 {loading ? "Входим..." : "Войти"}
               </button>
             </form>
-
-            <p className="mt-4 text-center text-xs text-zinc-400">
-              Первичный вход: <strong>admin/admin123</strong>, <strong>contractor/contractor123</strong>, <strong>ass/approver123</strong>, <strong>tb/approver123</strong>, <strong>guard/guard123</strong>.
-            </p>
 
             <p className="mt-4 text-center text-sm text-zinc-500">
               Нет аккаунта?{" "}

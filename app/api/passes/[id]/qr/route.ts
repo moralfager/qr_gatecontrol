@@ -6,7 +6,7 @@ import { errorResponse } from "../../../../../lib/server/http";
 
 export async function GET(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
-    await requireUser(request);
+    await requireUser(request, ["admin", "approver", "contractor"]);
     const { id } = await context.params;
     const result = await query("SELECT qr_payload FROM passes WHERE id = $1", [Number(id)]);
     if (!result.rows[0]) return new Response("Not found", { status: 404 });

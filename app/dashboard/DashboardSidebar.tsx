@@ -7,7 +7,6 @@ import SidebarShell from "../components/SidebarShell";
 const NAV = [
   { href: "/dashboard", label: "Сводка" },
   { href: "/dashboard/requests", label: "Заявки на согласование" },
-  { href: "/dashboard/pass", label: "Выпуск пропуска" },
   { href: "/dashboard/passes", label: "Пропуски" },
 ];
 
@@ -15,7 +14,7 @@ export default function DashboardSidebar() {
   const pathname = usePathname();
   return (
     <SidebarShell title="Кабинет согласующего">
-      <ul className="flex flex-col gap-1">
+      <ul className="grid grid-cols-2 gap-2 lg:flex lg:min-w-0 lg:flex-col">
         {NAV.map(({ href, label }) => {
           const isActive =
             href === "/dashboard"
@@ -25,7 +24,7 @@ export default function DashboardSidebar() {
             <li key={href}>
               <Link
                 href={href}
-                className={`block rounded-lg px-4 py-2.5 text-sm font-medium transition-colors ${
+                className={`block rounded-lg px-3 py-2.5 text-center text-sm font-medium transition-colors lg:px-4 lg:text-left ${
                   isActive
                     ? "bg-[#032c4f] text-white"
                     : "text-zinc-700 hover:bg-zinc-100"

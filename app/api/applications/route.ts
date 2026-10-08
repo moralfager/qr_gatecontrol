@@ -4,6 +4,7 @@ import { withTransaction, query } from "../../../lib/server/db";
 import { requireUser } from "../../../lib/server/auth";
 import {
   audit,
+  applicationHistory,
   createApprovals,
   defaultRoute,
   nextApplicationNumber,
@@ -15,8 +16,9 @@ import { saveUpload } from "../../../lib/server/files";
 export const runtime = "nodejs";
 
 type Payload = {
-  type: "workers" | "vehicles" | "both";
+  type: "workers" | "vehicles";
   action: "draft" | "submit";
+  organizationId?: number | null;
   zoneIds: number[];
   comment?: string;
   workers: {
@@ -52,10 +54,10 @@ function required(value: unknown, label: string, errors: string[]) {
 
 export async function GET(request: NextRequest) {
   try {
-    const user = await requireUser(request);
+    const user = await requireUser(request, ["admin", "approver", "contractor"]);
     const params: unknown[] = [];
     let where = "true";
-    if (user.role === "contractor" || user.role === "user") {
+    if (user.role === "contractor") {
       params.push(user.id, user.organization_id);
       where = "(a.created_by = $1 OR a.organization_id = $2)";
     }
@@ -83,7 +85,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const user = await requireUser(request, ["admin", "contractor", "user"]);
+    const user = await requireUser(request, ["admin", "approver", "contractor"]);
     const formData = await request.formData();
     const rawPayload = formData.get("payload");
     if (typeof rawPayload !== "string") {
@@ -91,7 +93,24 @@ export async function POST(request: NextRequest) {
     }
     const payload = JSON.parse(rawPayload) as Payload;
     const errors: string[] = [];
+    if (!Array.isArray(payload.workers)) payload.workers = [];
+    if (!Array.isArray(payload.vehicles)) payload.vehicles = [];
+    if (!["workers", "vehicles"].includes(payload.type)) {
+      errors.push("Тип заявки должен быть: Работники или Автотранспорт.");
+    }
+    if (payload.type === "workers" && payload.vehicles.length) {
+      errors.push("В заявке на работников нельзя добавлять автотранспорт.");
+    }
+    if (payload.type === "vehicles" && payload.workers.length) {
+      errors.push("В заявке на автотранспорт нельзя добавлять работников.");
+    }
+    const canChooseOrganization = user.role === "admin" || (user.role === "approver" && user.department === "ТБ");
+    if (user.role === "approver" && user.department !== "ТБ") {
+      return json({ error: "Создание заявок доступно только согласующему ТБ" }, 403);
+    }
+    const organizationId = canChooseOrganization ? Number(payload.organizationId || 0) : user.organization_id;
 
+    if (!organizationId) errors.push("Выберите организацию.");
     if (!payload.zoneIds?.length) errors.push("Выберите хотя бы одну территорию.");
     if (!payload.workers?.length && !payload.vehicles?.length) errors.push("Добавьте работников или автотранспорт.");
     for (const [index, worker] of payload.workers.entries()) {
@@ -110,22 +129,28 @@ export async function POST(request: NextRequest) {
     if (errors.length) return json({ error: errors.join("\n") }, 400);
 
     const result = await withTransaction(async (client) => {
+      const organization = await client.query("SELECT id FROM organizations WHERE id = $1 AND active = true", [organizationId]);
+      if (!organization.rowCount) {
+        throw Object.assign(new Error("Организация не найдена или отключена"), { status: 400 });
+      }
       const route = payload.action === "submit" ? await defaultRoute(client) : null;
       if (payload.action === "submit" && !route) {
         throw Object.assign(new Error("Не настроен маршрут согласования"), { status: 400 });
       }
       const number = await nextApplicationNumber(client);
+      const approvalCycle = payload.action === "submit" ? 1 : 0;
       const application = await client.query(
-        `INSERT INTO applications (number, type, status, organization_id, created_by, route_id, comment, submitted_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, ${payload.action === "submit" ? "now()" : "NULL"})
+        `INSERT INTO applications (number, type, status, organization_id, created_by, route_id, approval_cycle, comment, submitted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ${payload.action === "submit" ? "now()" : "NULL"})
          RETURNING *`,
         [
           number,
           payload.type,
           payload.action === "submit" ? "submitted" : "draft",
-          user.organization_id,
+          organizationId,
           user.id,
           route?.id ?? null,
+          approvalCycle,
           payload.comment ?? "",
         ],
       );
@@ -170,7 +195,11 @@ export async function POST(request: NextRequest) {
             if (payload.action === "submit") missingDocs.push(`${worker.fullName}: ${doc.name}`);
             continue;
           }
-          await saveDocument(client, applicationId, "worker", subjectId, doc.id, file, user.id);
+          await saveDocument(client, applicationId, "worker", subjectId, doc.id, file, user.id, {
+            applicationNumber: number,
+            documentName: doc.name,
+            subjectLabel: worker.fullName,
+          });
         }
       }
 
@@ -205,7 +234,11 @@ export async function POST(request: NextRequest) {
             if (payload.action === "submit") missingDocs.push(`${vehicle.plate}: ${doc.name}`);
             continue;
           }
-          await saveDocument(client, applicationId, "vehicle", subjectId, doc.id, file, user.id);
+          await saveDocument(client, applicationId, "vehicle", subjectId, doc.id, file, user.id, {
+            applicationNumber: number,
+            documentName: doc.name,
+            subjectLabel: vehicle.plate,
+          });
         }
       }
 
@@ -213,11 +246,30 @@ export async function POST(request: NextRequest) {
         throw Object.assign(new Error(`Не хватает документов:\n${missingDocs.join("\n")}`), { status: 400 });
       }
       if (payload.action === "submit" && route) {
-        await createApprovals(client, applicationId, route.id);
+        await createApprovals(client, applicationId, route.id, approvalCycle);
         await notifyPendingApprovers(client, applicationId);
       }
+      await applicationHistory(
+        client,
+        applicationId,
+        approvalCycle,
+        payload.action === "submit" ? "application.submit" : "application.draft",
+        user.id,
+        null,
+        payload.action === "submit" ? "submitted" : "draft",
+        payload.comment ?? "",
+        { number },
+      );
       await audit(client, user.id, payload.action === "submit" ? "application.submit" : "application.draft", "application", applicationId, {
         number,
+        type: payload.type,
+        status: payload.action === "submit" ? "submitted" : "draft",
+        cycle: approvalCycle,
+        organizationId,
+        zones: payload.zoneIds,
+        workersCount: payload.workers.length,
+        vehiclesCount: payload.vehicles.length,
+        comment: payload.comment ?? "",
       });
       return application.rows[0];
     });
@@ -235,9 +287,21 @@ async function saveDocument(
   documentTypeId: number,
   file: File,
   userId: number,
+  context: {
+    applicationNumber: string;
+    documentName: string;
+    subjectLabel: string;
+  },
 ) {
+  const existing = await client.query<{ id: number; original_name: string; size_bytes: number }>(
+    `SELECT id, original_name, size_bytes
+     FROM documents
+     WHERE application_id = $1 AND subject_type = $2 AND subject_id = $3 AND document_type_id = $4
+     FOR UPDATE`,
+    [applicationId, subjectType, subjectId, documentTypeId],
+  );
   const saved = await saveUpload(applicationId, file);
-  await client.query(
+  const document = await client.query<{ id: number }>(
     `INSERT INTO documents
        (application_id, subject_type, subject_id, document_type_id, original_name, stored_path, mime_type, size_bytes, uploaded_by)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -247,7 +311,8 @@ async function saveDocument(
                    mime_type = EXCLUDED.mime_type,
                    size_bytes = EXCLUDED.size_bytes,
                    uploaded_by = EXCLUDED.uploaded_by,
-                   created_at = now()`,
+                   created_at = now()
+     RETURNING id`,
     [
       applicationId,
       subjectType,
@@ -260,4 +325,17 @@ async function saveDocument(
       userId,
     ],
   );
+  const previous = existing.rows[0];
+  await audit(client, userId, previous ? "document.replace" : "document.upload", "document", document.rows[0]?.id ?? previous?.id, {
+    applicationId,
+    applicationNumber: context.applicationNumber,
+    subjectType,
+    subjectLabel: context.subjectLabel,
+    documentTypeId,
+    documentName: context.documentName,
+    fileName: saved.originalName,
+    sizeBytes: saved.sizeBytes,
+    previousFileName: previous?.original_name,
+    previousSizeBytes: previous?.size_bytes,
+  });
 }

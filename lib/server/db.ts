@@ -13,7 +13,6 @@ function connectionString() {
 }
 
 declare global {
-  // eslint-disable-next-line no-var
   var gatecontrolPool: pg.Pool | undefined;
 }
 

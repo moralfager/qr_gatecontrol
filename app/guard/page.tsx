@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Post = {
   id: number;
@@ -34,6 +34,13 @@ type ScanResult = {
 
 type Phase = "ready" | "scanned" | "saved";
 
+type BarcodeDetectorResult = { rawValue: string };
+type BarcodeDetectorInstance = {
+  detect(source: CanvasImageSource): Promise<BarcodeDetectorResult[]>;
+};
+type BarcodeDetectorConstructor = new (options?: { formats?: string[] }) => BarcodeDetectorInstance;
+type WindowWithBarcodeDetector = Window & { BarcodeDetector?: BarcodeDetectorConstructor };
+
 function formatDate(value?: string | null) {
   if (!value) return "-";
   return new Date(value).toLocaleDateString("ru-RU");
@@ -45,6 +52,9 @@ function holderName(pass: ScannedPass) {
 }
 
 export default function GuardPage() {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const frameRef = useRef<number | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
   const [selectedPost, setSelectedPost] = useState<number>(0);
   const [finalPost, setFinalPost] = useState<number>(0);
@@ -55,6 +65,9 @@ export default function GuardPage() {
   const [comment, setComment] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraError, setCameraError] = useState("");
+  const [autoScanFromUrl, setAutoScanFromUrl] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
@@ -82,16 +95,22 @@ export default function GuardPage() {
 
   useEffect(() => {
     const token = new URLSearchParams(window.location.search).get("token");
-    if (token) setTokenOrNumber(token);
+    if (token) {
+      setTokenOrNumber(token);
+      setAutoScanFromUrl(true);
+    }
   }, []);
+
+  useEffect(() => () => stopCamera(), []);
 
   const currentPost = useMemo(
     () => posts.find((post) => post.id === selectedPost),
     [posts, selectedPost],
   );
 
-  async function scan() {
-    if (!tokenOrNumber.trim() || !selectedPost) return;
+  const scan = useCallback(async (value = tokenOrNumber) => {
+    const valueToCheck = value.trim();
+    if (!valueToCheck || !selectedPost) return;
     setBusy(true);
     setError("");
     setMessage("");
@@ -100,7 +119,7 @@ export default function GuardPage() {
       const response = await fetch("/api/guard/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tokenOrNumber, defaultPostId: selectedPost }),
+        body: JSON.stringify({ tokenOrNumber: valueToCheck, defaultPostId: selectedPost }),
       });
       const data = await response.json();
       if (!response.ok && data.valid !== false) throw new Error(data.error || "Сканирование не выполнено");
@@ -112,6 +131,80 @@ export default function GuardPage() {
     } finally {
       setBusy(false);
     }
+  }, [selectedPost, tokenOrNumber]);
+
+  useEffect(() => {
+    if (!postEntered || !autoScanFromUrl || !selectedPost || !tokenOrNumber.trim()) return;
+    setAutoScanFromUrl(false);
+    void scan(tokenOrNumber);
+  }, [autoScanFromUrl, postEntered, scan, selectedPost, tokenOrNumber]);
+
+  function stopCamera() {
+    if (frameRef.current) {
+      window.cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setCameraOpen(false);
+  }
+
+  async function startCamera() {
+    setCameraError("");
+    setError("");
+    const detectorConstructor = (window as WindowWithBarcodeDetector).BarcodeDetector;
+    if (!detectorConstructor) {
+      setCameraError("Браузер не поддерживает распознавание QR через камеру. Используйте ручной ввод.");
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError("Камера недоступна в этом браузере.");
+      return;
+    }
+
+    try {
+      stopCamera();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      setCameraOpen(true);
+      const video = videoRef.current;
+      if (!video) throw new Error("Видеоэлемент не готов");
+      video.srcObject = stream;
+      await video.play();
+      const detector = new detectorConstructor({ formats: ["qr_code"] });
+      void detectQr(detector);
+    } catch (err) {
+      stopCamera();
+      setCameraError(err instanceof Error ? err.message : "Камера не открылась");
+    }
+  }
+
+  async function detectQr(detector: BarcodeDetectorInstance) {
+    const video = videoRef.current;
+    if (!video || !streamRef.current) return;
+    try {
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        const codes = await detector.detect(video);
+        const value = codes[0]?.rawValue?.trim();
+        if (value) {
+          setTokenOrNumber(value);
+          stopCamera();
+          await scan(value);
+          return;
+        }
+      }
+    } catch (err) {
+      stopCamera();
+      setCameraError(err instanceof Error ? err.message : "QR не удалось распознать");
+      return;
+    }
+    frameRef.current = window.requestAnimationFrame(() => {
+      void detectQr(detector);
+    });
   }
 
   async function record(result: "allowed" | "denied" | "invalid") {
@@ -146,6 +239,8 @@ export default function GuardPage() {
     setTokenOrNumber("");
     setScanResult(null);
     setComment("");
+    stopCamera();
+    setCameraError("");
     setPhase("ready");
     setMessage("");
     setError("");
@@ -227,12 +322,33 @@ export default function GuardPage() {
           <button
             type="button"
             disabled={busy || !tokenOrNumber.trim()}
-            onClick={scan}
+            onClick={() => scan()}
+            className="rounded-xl border border-zinc-300 bg-white px-6 py-3 font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+          >
+            Проверить вручную
+          </button>
+          <button
+            type="button"
+            disabled={busy || cameraOpen}
+            onClick={startCamera}
             className="rounded-xl bg-[#032c4f] px-6 py-3 font-medium text-white hover:bg-[#042a4a] disabled:opacity-50"
           >
-            Проверить
+            Проверить QR
           </button>
         </div>
+        <div className={`mt-4 ${cameraOpen ? "block" : "hidden"}`}>
+          <div className="overflow-hidden rounded-xl border border-zinc-200 bg-black">
+            <video ref={videoRef} muted playsInline className="aspect-video w-full object-cover" />
+          </div>
+          <button
+            type="button"
+            onClick={stopCamera}
+            className="mt-3 rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+          >
+            Закрыть камеру
+          </button>
+        </div>
+        {cameraError && <p className="mt-3 text-sm text-amber-700">{cameraError}</p>}
         <p className="mt-2 text-xs text-zinc-500">QR на пропуске ведет на эту страницу с токеном; ручной ввод номера тоже поддерживается.</p>
       </section>
 

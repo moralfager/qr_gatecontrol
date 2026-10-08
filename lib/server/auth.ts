@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { query } from "./db";
 
@@ -73,8 +74,7 @@ export function readSession(value?: string | null) {
   return Number(idRaw);
 }
 
-export async function getCurrentUser(request: NextRequest): Promise<CurrentUser | null> {
-  const userId = readSession(request.cookies.get(SESSION_COOKIE)?.value);
+async function getUserById(userId: number): Promise<CurrentUser | null> {
   if (!userId) return null;
   const result = await query<CurrentUser>(
     `
@@ -87,6 +87,17 @@ export async function getCurrentUser(request: NextRequest): Promise<CurrentUser 
     [userId],
   );
   return result.rows[0] ?? null;
+}
+
+export async function getCurrentUser(request: NextRequest): Promise<CurrentUser | null> {
+  const userId = readSession(request.cookies.get(SESSION_COOKIE)?.value);
+  return userId ? getUserById(userId) : null;
+}
+
+export async function getCurrentUserFromCookies(): Promise<CurrentUser | null> {
+  const cookieStore = await cookies();
+  const userId = readSession(cookieStore.get(SESSION_COOKIE)?.value);
+  return userId ? getUserById(userId) : null;
 }
 
 export async function requireUser(request: NextRequest, roles?: string[]) {

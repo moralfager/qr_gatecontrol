@@ -5,10 +5,10 @@ import { errorResponse, json } from "../../../lib/server/http";
 
 export async function GET(request: NextRequest) {
   try {
-    const user = await requireUser(request);
+    const user = await requireUser(request, ["admin", "approver", "contractor"]);
     const params: unknown[] = [];
     let where = "true";
-    if (user.role === "contractor" || user.role === "user") {
+    if (user.role === "contractor") {
       params.push(user.id, user.organization_id);
       where = "(a.created_by = $1 OR a.organization_id = $2)";
     }

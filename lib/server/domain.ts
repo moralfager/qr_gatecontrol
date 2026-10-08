@@ -1,9 +1,10 @@
 import crypto from "node:crypto";
+import type pg from "pg";
 import { query } from "./db";
 import type { CurrentUser } from "./auth";
 
 export type AppClient = {
-  query: (text: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount: number | null }>;
+  query: (text: string, params?: unknown[]) => Promise<pg.QueryResult<pg.QueryResultRow>>;
 };
 
 export function appBaseUrl() {
@@ -22,6 +23,24 @@ export async function audit(
     `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details)
      VALUES ($1, $2, $3, $4, $5::jsonb)`,
     [userId, action, entityType, entityId ?? null, JSON.stringify(details)],
+  );
+}
+
+export async function applicationHistory(
+  client: AppClient,
+  applicationId: number,
+  cycle: number,
+  action: string,
+  actorUserId: number | null,
+  statusFrom: string | null,
+  statusTo: string | null,
+  comment = "",
+  details: Record<string, unknown> = {},
+) {
+  await client.query(
+    `INSERT INTO application_history (application_id, cycle, action, actor_user_id, status_from, status_to, comment, details)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+    [applicationId, cycle, action, actorUserId, statusFrom, statusTo, comment, JSON.stringify(details)],
   );
 }
 
@@ -131,17 +150,17 @@ export async function defaultRoute(client: AppClient) {
   return result.rows[0] ?? null;
 }
 
-export async function createApprovals(client: AppClient, applicationId: number, routeId: number) {
+export async function createApprovals(client: AppClient, applicationId: number, routeId: number, cycle: number) {
   const steps = await client.query(
     "SELECT * FROM approval_route_steps WHERE route_id = $1 AND required = true ORDER BY step_order, id",
     [routeId],
   );
   for (const step of steps.rows) {
     await client.query(
-      `INSERT INTO approvals (application_id, route_step_id, approver_user_id, department)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (application_id, route_step_id) DO NOTHING`,
-      [applicationId, step.id, step.approver_user_id, step.department],
+      `INSERT INTO approvals (application_id, route_step_id, approver_user_id, department, cycle)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (application_id, route_step_id, cycle) DO NOTHING`,
+      [applicationId, step.id, step.approver_user_id, step.department, cycle],
     );
   }
 }
@@ -169,35 +188,39 @@ export async function notifyPendingApprovers(client: AppClient, applicationId: n
 
 export async function currentPendingApprovals(client: AppClient, applicationId: number) {
   const routeResult = await client.query(
-    `SELECT r.mode FROM applications a JOIN approval_routes r ON r.id = a.route_id WHERE a.id = $1`,
+    `SELECT r.mode, a.approval_cycle
+     FROM applications a
+     JOIN approval_routes r ON r.id = a.route_id
+     WHERE a.id = $1`,
     [applicationId],
   );
   const mode = routeResult.rows[0]?.mode ?? "parallel";
+  const cycle = routeResult.rows[0]?.approval_cycle ?? 0;
   if (mode === "parallel") {
     const result = await client.query(
-      "SELECT * FROM approvals WHERE application_id = $1 AND decision = 'pending' ORDER BY id",
-      [applicationId],
+      "SELECT * FROM approvals WHERE application_id = $1 AND cycle = $2 AND decision = 'pending' ORDER BY id",
+      [applicationId, cycle],
     );
     return result.rows;
   }
   const orderResult = await client.query(
-    "SELECT MIN(ars.step_order) AS step_order FROM approvals ap JOIN approval_route_steps ars ON ars.id = ap.route_step_id WHERE ap.application_id = $1 AND ap.decision = 'pending'",
-    [applicationId],
+    "SELECT MIN(ars.step_order) AS step_order FROM approvals ap JOIN approval_route_steps ars ON ars.id = ap.route_step_id WHERE ap.application_id = $1 AND ap.cycle = $2 AND ap.decision = 'pending'",
+    [applicationId, cycle],
   );
   if (!orderResult.rows[0]?.step_order) return [];
   const result = await client.query(
     `SELECT ap.*
      FROM approvals ap
      JOIN approval_route_steps ars ON ars.id = ap.route_step_id
-     WHERE ap.application_id = $1 AND ap.decision = 'pending' AND ars.step_order = $2`,
-    [applicationId, orderResult.rows[0].step_order],
+     WHERE ap.application_id = $1 AND ap.cycle = $2 AND ap.decision = 'pending' AND ars.step_order = $3`,
+    [applicationId, cycle, orderResult.rows[0].step_order],
   );
   return result.rows;
 }
 
 export async function canDecideApproval(client: AppClient, user: CurrentUser, approvalId: number) {
   const approvalResult = await client.query(
-    `SELECT ap.*, a.status AS application_status, r.mode, ars.step_order
+    `SELECT ap.*, a.status AS application_status, a.approval_cycle, r.mode, ars.step_order
      FROM approvals ap
      JOIN applications a ON a.id = ap.application_id
      JOIN approval_route_steps ars ON ars.id = ap.route_step_id
@@ -206,7 +229,7 @@ export async function canDecideApproval(client: AppClient, user: CurrentUser, ap
     [approvalId],
   );
   const approval = approvalResult.rows[0];
-  if (!approval || approval.decision !== "pending" || approval.application_status !== "submitted") {
+  if (!approval || approval.decision !== "pending" || approval.application_status !== "submitted" || approval.cycle !== approval.approval_cycle) {
     return { ok: false, approval };
   }
   if (user.role !== "admin") {
@@ -218,8 +241,8 @@ export async function canDecideApproval(client: AppClient, user: CurrentUser, ap
       `SELECT COUNT(*)::int AS count
        FROM approvals ap
        JOIN approval_route_steps ars ON ars.id = ap.route_step_id
-       WHERE ap.application_id = $1 AND ap.decision = 'pending' AND ars.step_order < $2`,
-      [approval.application_id, approval.step_order],
+       WHERE ap.application_id = $1 AND ap.cycle = $2 AND ap.decision = 'pending' AND ars.step_order < $3`,
+      [approval.application_id, approval.cycle, approval.step_order],
     );
     if (earlier.rows[0]?.count) return { ok: false, approval };
   }
@@ -235,16 +258,36 @@ export async function issuePasses(client: AppClient, applicationId: number, appr
     "SELECT * FROM application_vehicles WHERE application_id = $1 ORDER BY id",
     [applicationId],
   );
-  const zones = await client.query("SELECT zone_id FROM application_zones WHERE application_id = $1 ORDER BY zone_id", [
-    applicationId,
-  ]);
+  const zones = await client.query(
+    "SELECT zone_id FROM application_zones WHERE application_id = $1 ORDER BY zone_id",
+    [applicationId],
+  );
+  const passZones = zones.rows as { zone_id: number }[];
+  const approvedBySummary = await approvalSummary(client, applicationId, approvedBy);
 
   for (const worker of workers.rows) {
-    await issueOnePass(client, applicationId, "worker", worker.id, worker.validity_from, worker.validity_to, approvedBy, zones.rows);
+    await issueOnePass(client, applicationId, "worker", worker.id, worker.validity_from, worker.validity_to, approvedBySummary, passZones);
   }
   for (const vehicle of vehicles.rows) {
-    await issueOnePass(client, applicationId, "vehicle", vehicle.id, vehicle.validity_from, vehicle.validity_to, approvedBy, zones.rows);
+    await issueOnePass(client, applicationId, "vehicle", vehicle.id, vehicle.validity_from, vehicle.validity_to, approvedBySummary, passZones);
   }
+}
+
+async function approvalSummary(client: AppClient, applicationId: number, fallback: string) {
+  const result = await client.query(
+    `SELECT ap.department, COALESCE(u.name, ap.department) AS approver_name, ap.decided_at
+     FROM approvals ap
+     JOIN applications a ON a.id = ap.application_id AND a.approval_cycle = ap.cycle
+     LEFT JOIN users u ON u.id = ap.approver_user_id
+     WHERE ap.application_id = $1 AND ap.decision = 'approved'
+     ORDER BY ap.decided_at, ap.id`,
+    [applicationId],
+  );
+  const values = result.rows.map((row) => {
+    const decidedAt = row.decided_at ? new Date(row.decided_at as string | Date).toLocaleString("ru-RU") : "";
+    return `${row.department}: ${row.approver_name}${decidedAt ? `, ${decidedAt}` : ""}`;
+  });
+  return values.length ? values.join("; ") : fallback;
 }
 
 async function issueOnePass(
@@ -258,7 +301,10 @@ async function issueOnePass(
   zones: { zone_id: number }[],
 ) {
   const exists = await client.query("SELECT id FROM passes WHERE subject_type = $1 AND subject_id = $2", [subjectType, subjectId]);
-  if (exists.rowCount) return;
+  if (exists.rowCount) {
+    await client.query("UPDATE passes SET approved_by = $1 WHERE id = $2", [approvedBy, exists.rows[0].id]);
+    return;
+  }
   const number = await nextPassNumber(client, subjectType);
   const token = makeToken();
   const qrPayload = `${appBaseUrl()}/guard?token=${encodeURIComponent(token)}`;
@@ -280,7 +326,10 @@ export async function applicationSummaryWhere(user: CurrentUser) {
   if (user.role === "admin" || user.role === "approver") {
     return { where: "true", params: [] as unknown[] };
   }
-  return { where: "a.created_by = $1 OR a.organization_id = $2", params: [user.id, user.organization_id] as unknown[] };
+  if (user.role === "contractor") {
+    return { where: "a.created_by = $1 OR a.organization_id = $2", params: [user.id, user.organization_id] as unknown[] };
+  }
+  return { where: "false", params: [] as unknown[] };
 }
 
 export async function getApplicationDetails(applicationId: number, user: CurrentUser) {
@@ -295,7 +344,7 @@ export async function getApplicationDetails(applicationId: number, user: Current
   );
   const application = appResult.rows[0];
   if (!application) return null;
-  const [zones, workers, vehicles, documents, approvals, passes] = await Promise.all([
+  const [zones, workers, vehicles, documents, approvals, passes, history] = await Promise.all([
     query(
       `SELECT z.* FROM application_zones az JOIN zones z ON z.id = az.zone_id WHERE az.application_id = $1 ORDER BY z.name`,
       [applicationId],
@@ -322,10 +371,11 @@ export async function getApplicationDetails(applicationId: number, user: Current
       [applicationId],
     ),
     query(
-      `SELECT ap.*, u.name AS approver_name
+      `SELECT ap.*, u.name AS approver_name, ars.step_order
        FROM approvals ap
+       JOIN approval_route_steps ars ON ars.id = ap.route_step_id
        LEFT JOIN users u ON u.id = ap.approver_user_id
-       WHERE ap.application_id = $1 ORDER BY ap.id`,
+       WHERE ap.application_id = $1 ORDER BY ap.cycle, ars.step_order, ap.id`,
       [applicationId],
     ),
     query(
@@ -338,14 +388,30 @@ export async function getApplicationDetails(applicationId: number, user: Current
        ORDER BY p.id`,
       [applicationId],
     ),
+    query(
+      `SELECT ah.*, u.name AS actor_name
+       FROM application_history ah
+       LEFT JOIN users u ON u.id = ah.actor_user_id
+       WHERE ah.application_id = $1
+       ORDER BY ah.created_at, ah.id`,
+      [applicationId],
+    ),
   ]);
+  const decoratedApprovals = [];
+  const queryClient = { query: (text: string, params?: unknown[]) => query(text, params) };
+  for (const approval of approvals.rows) {
+    const decision = await canDecideApproval(queryClient, user, Number(approval.id));
+    decoratedApprovals.push({ ...approval, can_decide: decision.ok });
+  }
+
   return {
     application,
     zones: zones.rows,
     workers: workers.rows,
     vehicles: vehicles.rows,
     documents: documents.rows,
-    approvals: approvals.rows,
+    approvals: decoratedApprovals,
     passes: passes.rows,
+    history: history.rows,
   };
 }

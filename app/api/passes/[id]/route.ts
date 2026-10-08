@@ -5,16 +5,25 @@ import { errorResponse, json } from "../../../../lib/server/http";
 
 export async function GET(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
-    const user = await requireUser(request);
+    const user = await requireUser(request, ["admin", "approver", "contractor"]);
     const { id } = await context.params;
     const params: unknown[] = [Number(id)];
     let scope = "true";
-    if (user.role === "contractor" || user.role === "user") {
+    if (user.role === "contractor") {
       params.push(user.id, user.organization_id);
       scope = "(a.created_by = $2 OR a.organization_id = $3)";
     }
     const result = await query(
       `SELECT p.*, a.number AS application_number, o.name AS organization_name,
+              COALESCE(
+                (
+                  SELECT string_agg(ap.department || ': ' || COALESCE(u.name, ap.department) || COALESCE(', ' || to_char(ap.decided_at, 'DD.MM.YYYY, HH24:MI:SS'), ''), '; ' ORDER BY ap.decided_at, ap.id)
+                  FROM approvals ap
+                  LEFT JOIN users u ON u.id = ap.approver_user_id
+                  WHERE ap.application_id = a.id AND ap.decision = 'approved'
+                ),
+                p.approved_by
+              ) AS approved_by,
               aw.full_name, aw.position, aw.iin,
               av.make, av.plate, av.trailer,
               string_agg(DISTINCT z.name, ', ' ORDER BY z.name) AS zones

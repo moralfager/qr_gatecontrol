@@ -3,6 +3,7 @@ import { requireUser } from "../../../../../lib/server/auth";
 import { withTransaction } from "../../../../../lib/server/db";
 import {
   audit,
+  applicationHistory,
   canDecideApproval,
   issuePasses,
   notifyPendingApprovers,
@@ -27,8 +28,8 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       }
       const approval = allowed.approval;
       await client.query(
-        "UPDATE approvals SET decision = $1, comment = $2, decided_at = now() WHERE id = $3",
-        [decision, comment, Number(id)],
+        "UPDATE approvals SET decision = $1, comment = $2, decided_at = now(), approver_user_id = $4 WHERE id = $3",
+        [decision, comment, Number(id), user.id],
       );
       const appResult = await client.query(
         `SELECT a.*, u.email AS creator_email, u.id AS creator_id
@@ -52,8 +53,8 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
         );
       } else {
         const pending = await client.query(
-          "SELECT COUNT(*)::int AS count FROM approvals WHERE application_id = $1 AND decision = 'pending'",
-          [application.id],
+          "SELECT COUNT(*)::int AS count FROM approvals WHERE application_id = $1 AND cycle = $2 AND decision = 'pending'",
+          [application.id, approval.cycle],
         );
         if (pending.rows[0].count === 0) {
           await client.query(
@@ -61,6 +62,17 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
             [application.id],
           );
           await issuePasses(client, application.id, `${user.name}, ${new Date().toLocaleString("ru-RU")}`);
+          await applicationHistory(
+            client,
+            application.id,
+            approval.cycle,
+            "application.approved",
+            user.id,
+            application.status,
+            "approved",
+            "",
+            { number: application.number },
+          );
           await queueNotification(
             client,
             application.creator_id,
@@ -72,8 +84,22 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
           await notifyPendingApprovers(client, application.id);
         }
       }
+      await applicationHistory(
+        client,
+        application.id,
+        approval.cycle,
+        `approval.${decision}`,
+        user.id,
+        application.status,
+        decision === "approved" ? application.status : decision,
+        comment,
+        { approvalId: Number(id), department: approval.department },
+      );
       await audit(client, user.id, `approval.${decision}`, "application", application.id, {
+        applicationNumber: application.number,
         approvalId: Number(id),
+        department: approval.department,
+        decision,
         comment,
       });
       return application.id;

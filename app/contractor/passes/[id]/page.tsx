@@ -1,11 +1,33 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
+type PassDetails = {
+  id: number;
+  number: string;
+  subject_type: "worker" | "vehicle";
+  organization_name: string | null;
+  full_name: string | null;
+  position: string | null;
+  iin: string | null;
+  make: string | null;
+  plate: string | null;
+  trailer: string | null;
+  valid_from: string;
+  valid_to: string;
+  zones: string | null;
+  approved_by: string | null;
+};
+
 export default function ContractorPassPage({ params }: { params: Promise<{ id: string }> }) {
+  const pathname = usePathname();
+  const isApproverPath = pathname?.startsWith("/approver");
+  const backHref = isApproverPath ? "/approver" : "/contractor";
+  const backLabel = isApproverPath ? "Кабинет согласующего" : "Кабинет подрядчика";
   const [id, setId] = useState("");
-  const [pass, setPass] = useState<any>(null);
+  const [pass, setPass] = useState<PassDetails | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -27,15 +49,20 @@ export default function ContractorPassPage({ params }: { params: Promise<{ id: s
   if (!pass) return <div className="rounded-xl border border-zinc-200 bg-white p-8 text-zinc-500">Загрузка...</div>;
 
   const isWorker = pass.subject_type === "worker";
+  function printPass() {
+    document.body.classList.add("printing-pass");
+    window.print();
+    window.setTimeout(() => document.body.classList.remove("printing-pass"), 300);
+  }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pass-print-root">
       <div className="flex items-center gap-4 print:hidden">
-        <Link href="/contractor" className="text-sm font-medium text-[#032c4f] hover:underline">← Кабинет подрядчика</Link>
+        <Link href={backHref} className="text-sm font-medium text-[#032c4f] hover:underline">← {backLabel}</Link>
       </div>
 
       <div className="flex flex-col items-start gap-6 lg:flex-row">
-        <div className="w-full max-w-3xl rounded-2xl border border-zinc-200 bg-white p-6 shadow-lg print:shadow-none">
+        <div className="pass-print-card w-full max-w-3xl rounded-2xl border border-zinc-200 bg-white p-6 shadow-lg print:shadow-none">
           <div className="flex flex-col gap-6 md:flex-row">
             <div className="flex flex-1 flex-col gap-4">
               <div className="text-xl font-bold text-[#032c4f]">КПП</div>
@@ -69,6 +96,7 @@ export default function ContractorPassPage({ params }: { params: Promise<{ id: s
               )}
             </div>
             <div className="flex justify-center md:block">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={`/api/passes/${pass.id}/qr`}
                 alt="QR-код пропуска"
@@ -81,7 +109,10 @@ export default function ContractorPassPage({ params }: { params: Promise<{ id: s
         <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-6 print:hidden lg:min-w-[260px]">
           <h2 className="font-semibold text-[#032c4f]">Действия</h2>
           <p className="mt-2 text-sm text-zinc-600">QR формируется внутри системы, без внешних сервисов.</p>
-          <button type="button" onClick={() => window.print()} className="mt-6 w-full rounded-lg bg-[#032c4f] py-2.5 text-sm font-medium text-white hover:bg-[#042a4a]">
+          <a href={`/api/passes/${pass.id}/pdf`} className="mt-6 block w-full rounded-lg bg-[#032c4f] py-2.5 text-center text-sm font-medium text-white hover:bg-[#042a4a]">
+            Скачать PDF
+          </a>
+          <button type="button" onClick={printPass} className="mt-3 w-full rounded-lg border border-zinc-300 bg-white py-2.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
             Печать / PDF
           </button>
         </div>
@@ -90,11 +121,11 @@ export default function ContractorPassPage({ params }: { params: Promise<{ id: s
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value }: { label: string; value: string | null }) {
   return (
     <div>
       <dt className="text-zinc-500">{label}</dt>
-      <dd className="font-medium text-zinc-900">{value}</dd>
+      <dd className="font-medium text-zinc-900">{value || "—"}</dd>
     </div>
   );
 }

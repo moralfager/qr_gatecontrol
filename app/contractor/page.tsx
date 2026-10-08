@@ -121,7 +121,24 @@ export default function ContractorPage() {
         <div className="border-b border-zinc-100 px-5 py-4">
           <h2 className="font-semibold text-[#032c4f]">Заявки</h2>
         </div>
-        <div className="overflow-x-auto">
+        <div className="grid gap-3 p-4 md:hidden">
+          {applications.length === 0 ? (
+            <div className="rounded-lg border border-zinc-100 bg-zinc-50 p-5 text-center text-sm text-zinc-500">Заявок пока нет.</div>
+          ) : applications.map((app) => (
+            <Link key={app.id} href={`/contractor/application/${app.id}`} className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm active:bg-zinc-50">
+              <div className="flex items-start justify-between gap-3">
+                <p className="font-semibold text-[#032c4f]">{app.number}</p>
+                {badge(app.status)}
+              </div>
+              <dl className="mt-3 grid gap-2 text-sm text-zinc-600">
+                <div><dt className="text-xs text-zinc-400">Объекты</dt><dd>{app.zones || "—"}</dd></div>
+                <div><dt className="text-xs text-zinc-400">Состав</dt><dd>Работники: {app.workers_count}; ТС: {app.vehicles_count}</dd></div>
+                <div><dt className="text-xs text-zinc-400">Дата</dt><dd>{formatDate(app.created_at)}</dd></div>
+              </dl>
+            </Link>
+          ))}
+        </div>
+        <div className="hidden overflow-x-auto md:block">
           <table className="w-full min-w-[760px] text-left text-sm">
             <thead className="bg-zinc-50 text-zinc-500">
               <tr>
@@ -157,7 +174,24 @@ export default function ContractorPage() {
         <div className="border-b border-zinc-100 px-5 py-4">
           <h2 className="font-semibold text-[#032c4f]">Пропуска</h2>
         </div>
-        <div className="overflow-x-auto">
+        <div className="grid gap-3 p-4 md:hidden">
+          {passes.length === 0 ? (
+            <div className="rounded-lg border border-zinc-100 bg-zinc-50 p-5 text-center text-sm text-zinc-500">Пропусков пока нет.</div>
+          ) : passes.map((pass) => (
+            <Link key={pass.id} href={`/contractor/passes/${pass.id}`} className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm active:bg-zinc-50">
+              <div className="flex items-start justify-between gap-3">
+                <p className="font-semibold text-[#032c4f]">{pass.number}</p>
+                {badge(pass.status)}
+              </div>
+              <dl className="mt-3 grid gap-2 text-sm text-zinc-600">
+                <div><dt className="text-xs text-zinc-400">Кому / ТС</dt><dd>{pass.subject_type === "worker" ? pass.full_name : `${pass.make} ${pass.plate}`}</dd></div>
+                <div><dt className="text-xs text-zinc-400">Период</dt><dd>{formatDate(pass.valid_from)} - {formatDate(pass.valid_to)}</dd></div>
+                <div><dt className="text-xs text-zinc-400">Объект</dt><dd>{pass.zones || "—"}</dd></div>
+              </dl>
+            </Link>
+          ))}
+        </div>
+        <div className="hidden overflow-x-auto md:block">
           <table className="w-full min-w-[760px] text-left text-sm">
             <thead className="bg-zinc-50 text-zinc-500">
               <tr>
