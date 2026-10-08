@@ -1,5 +1,6 @@
 "use client";
 
+import jsQR from "jsqr";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Post = {
@@ -53,6 +54,7 @@ function holderName(pass: ScannedPass) {
 
 export default function GuardPage() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const frameRef = useRef<number | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
@@ -154,10 +156,6 @@ export default function GuardPage() {
     setCameraError("");
     setError("");
     const detectorConstructor = (window as WindowWithBarcodeDetector).BarcodeDetector;
-    if (!detectorConstructor) {
-      setCameraError("Браузер не поддерживает распознавание QR через камеру. Используйте ручной ввод.");
-      return;
-    }
     if (!navigator.mediaDevices?.getUserMedia) {
       setCameraError("Камера недоступна в этом браузере.");
       return;
@@ -175,7 +173,7 @@ export default function GuardPage() {
       if (!video) throw new Error("Видеоэлемент не готов");
       video.srcObject = stream;
       await video.play();
-      const detector = new detectorConstructor({ formats: ["qr_code"] });
+      const detector = detectorConstructor ? new detectorConstructor({ formats: ["qr_code"] }) : null;
       void detectQr(detector);
     } catch (err) {
       stopCamera();
@@ -183,13 +181,23 @@ export default function GuardPage() {
     }
   }
 
-  async function detectQr(detector: BarcodeDetectorInstance) {
+  async function detectQr(detector: BarcodeDetectorInstance | null) {
     const video = videoRef.current;
     if (!video || !streamRef.current) return;
     try {
       if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-        const codes = await detector.detect(video);
-        const value = codes[0]?.rawValue?.trim();
+        let value = "";
+        if (detector) {
+          try {
+            const codes = await detector.detect(video);
+            value = codes[0]?.rawValue?.trim() ?? "";
+          } catch {
+            value = "";
+          }
+        }
+        if (!value) {
+          value = readQrFromCanvas(video);
+        }
         if (value) {
           setTokenOrNumber(value);
           stopCamera();
@@ -205,6 +213,21 @@ export default function GuardPage() {
     frameRef.current = window.requestAnimationFrame(() => {
       void detectQr(detector);
     });
+  }
+
+  function readQrFromCanvas(video: HTMLVideoElement) {
+    const canvas = canvasRef.current;
+    if (!canvas || !video.videoWidth || !video.videoHeight) return "";
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return "";
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+    const code = jsQR(imageData.data, imageData.width, imageData.height, {
+      inversionAttempts: "attemptBoth",
+    });
+    return code?.data?.trim() ?? "";
   }
 
   async function record(result: "allowed" | "denied" | "invalid") {
@@ -339,6 +362,7 @@ export default function GuardPage() {
         <div className={`mt-4 ${cameraOpen ? "block" : "hidden"}`}>
           <div className="overflow-hidden rounded-xl border border-zinc-200 bg-black">
             <video ref={videoRef} muted playsInline className="aspect-video w-full object-cover" />
+            <canvas ref={canvasRef} className="hidden" />
           </div>
           <button
             type="button"
